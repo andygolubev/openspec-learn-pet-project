@@ -1,13 +1,44 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Business domain
+  - B2B distributor of industrial MRO parts (bearings, fasteners, pneumatics, etc.).
+  - Customers: manufacturers and maintenance organizations.
+  - Today: quotes, orders, and documents live in email, PDFs, and phone.
+  - Goal: one digital channel where customers self-serve and staff see the same truth, with ERP as system of record.
+
+  Product definition
+  - Vue-based web portal (customer + internal roles) for quotes, orders, shipments, and documents.
+  - Email notifications now; in-app notifications later.
+  - Enterprise-ready access control; path to AI-assisted help/search later.
+  - Do not replace ERP or invent pricing outside authoritative systems.
+
+  Tech stack
+  - Frontend: Vue 3 (Composition API), Pinia, Vue Router. Nuxt 3 only if a public/marketing surface must be integrated.
+  - UI: component library and design tokens; WCAG 2.2 AA on core journeys.
+  - API: REST (default) or GraphQL if required; versioned; documented (e.g. OpenAPI).
+  - Auth: OAuth2/OIDC; MFA for internal users; SSO (SAML/OIDC) for large customers (phase 1 or 2 per rollout).
+  - Backend/integration: services connect to ERP for catalog, pricing, availability, orders, status, documents—no fake data in the UI.
+  - Platform: cloud in agreed region, HTTPS, centralized logging/metrics/error tracking, backups and incident process per IT.
+
+  Business requirements
+  - Accounts: company accounts, multiple users, roles (customer user/admin; separate internal roles); invites; password reset.
+  - Audit: log sensitive actions (role changes, quote/order exceptions, exports).
+  - Catalog: authenticated SKU search and filters; contract-aware pricing from ERP; clear UX when price/availability is missing.
+  - Quotes & orders: request quote; track status; convert accepted quote to order per policy; order timeline mirrors ERP states; documents (e.g. invoice PDF) when ERP provides them.
+  - Service: WISMO self-serve; tracking when available; support entry points with context (quote/order IDs).
+  - Internal: lookup customers/orders per permissions; exception/hold visibility per business rules (customer sees only what policy allows).
+  - Modern expectations: responsive (mobile-usable for status); data residency/retention per legal; privacy process for access/export/delete where regulations apply.
+  - AI (later or small pilot): assistive search/help or draft support text with human approval; no use of customer data for model training without contract.
+
+  Non-functional requirements
+  - Agreed uptime and performance targets for core pages; security (RBAC, secrets server-side, reviews); recoverability (backups, incident response).
+
+  Out of scope (unless explicitly added)
+  - Replacing ERP, multi-supplier marketplace, native mobile apps, fully automated pricing outside ERP rules.
+
+  Success measures
+  - Shorter quote-to-order time; fewer status/invoice support tickets; higher share of revenue through the portal; near-zero pricing/order submission errors with monitoring.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
