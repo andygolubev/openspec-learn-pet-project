@@ -16,7 +16,9 @@ context: |
   Tech stack
   - Frontend: Vue 3 (Composition API), Pinia, Vue Router. Nuxt 3 only if a public/marketing surface must be integrated.
   - UI: component library and design tokens; WCAG 2.2 AA on core journeys.
-  - API: REST (default) or GraphQL if required; versioned; documented (e.g. OpenAPI).
+  - API: REST (default) or GraphQL if required; versioned; documented (e.g. OpenAPI). Node.js (Fastify) in `apps/api`.
+  - Data: **CockroachDB** for application persistence (PostgreSQL wire protocol); API connects via **`DATABASE_URL`** using the **`pg`** driver. Migrations are SQL compatible with CockroachDB/Postgres. ERP remains system of record for catalog, pricing, and orders—no duplicate authoritative business data in the portal DB beyond identity and portal state.
+  - Containers (target): **Docker** + **Docker Compose** for local full-stack runs (API + web + CockroachDB); production packaging may reuse the same images or cloud-specific runtimes.
   - Auth: OAuth2/OIDC; MFA for internal users; SSO (SAML/OIDC) for large customers (phase 1 or 2 per rollout).
   - Backend/integration: services connect to ERP for catalog, pricing, availability, orders, status, documents—no fake data in the UI.
   - Platform: cloud in agreed region, HTTPS, centralized logging/metrics/error tracking, backups and incident process per IT.

@@ -37,8 +37,8 @@ export function loadConfig(): Config {
 export function resetConfigCache(): void {
   cached = null;
 }
-
 export function getDatabasePath(): string {
   const p = loadConfig().DATABASE_PATH;
   return path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
 }
+
