@@ -1,0 +1,17 @@
+{
+  "name": "openspec-learn-pet-project",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @portal/api & npm run dev --workspace @portal/web",
+    "dev:api": "npm run dev --workspace @portal/api",
+    "dev:web": "npm run dev --workspace @portal/web",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

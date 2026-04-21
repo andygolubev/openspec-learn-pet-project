@@ -1,0 +1,145 @@
+openapi: 3.1.0
+info:
+  title: Portal Accounts API
+  version: 0.1.0
+  description: |
+    REST API for B2B portal accounts (OIDC session, companies, invitations, RBAC).
+    Error responses use `{ "error": { "code": string, "message": string } }`.
+servers:
+  - url: http://localhost:3000
+    description: Local development
+paths:
+  /health:
+    get:
+      summary: Liveness
+      responses:
+        "200":
+          description: OK
+  /api/v1/auth/oidc/config:
+    get:
+      summary: OIDC discovery metadata for the SPA
+      responses:
+        "200":
+          description: Config payload
+  /api/v1/auth/oidc/callback:
+    post:
+      summary: Exchange authorization code (PKCE) and create session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, code_verifier]
+              properties:
+                code:
+                  type: string
+                code_verifier:
+                  type: string
+                invite_token:
+                  type: string
+      responses:
+        "200":
+          description: Session established (Set-Cookie portal_sid)
+        "400":
+          description: OIDC or validation error
+        "503":
+          description: OIDC not configured
+  /api/v1/auth/logout:
+    post:
+      summary: End session
+      responses:
+        "204":
+          description: Logged out
+  /api/v1/auth/session:
+    get:
+      summary: Current session
+      responses:
+        "200":
+          description: Authenticated or anonymous state
+  /api/v1/auth/recovery:
+    get:
+      summary: IdP recovery URL for account recovery UX
+      responses:
+        "200":
+          description: Recovery URL and guidance
+  /api/v1/companies/{companyId}:
+    get:
+      summary: Company profile (member)
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Company
+        "403":
+          description: Not a member
+  /api/v1/companies/{companyId}/users:
+    get:
+      summary: List members (customer admin)
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Member list
+        "403":
+          description: Forbidden
+  /api/v1/companies/{companyId}/users/{userId}:
+    patch:
+      summary: Change member roles (customer admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  items:
+                    type: string
+                    enum: [customer_user, customer_admin]
+    delete:
+      summary: Remove user from company (customer admin)
+  /api/v1/companies/{companyId}/invitations:
+    get:
+      summary: Pending invitations (customer admin)
+    post:
+      summary: Create invitation (rate limited)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "201":
+          description: Invitation created
+        "409":
+          description: Pending invite exists
+        "429":
+          description: Too many requests
+  /api/v1/companies/{companyId}/invitations/{inviteId}:
+    delete:
+      summary: Revoke pending invitation (customer admin)
+  /api/v1/internal/ping:
+    get:
+      summary: Internal health (internal role + MFA required)
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: MFA_REQUIRED or not internal
