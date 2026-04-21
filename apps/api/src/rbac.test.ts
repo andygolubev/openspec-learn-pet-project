@@ -1,23 +1,79 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 import { buildApp } from "./app.js";
+import { resetConfigCache } from "./config.js";
+import { exec } from "./db/query.js";
+import { resetPoolSingleton } from "./db/pool.js";
+import { runMigrations } from "./db/runMigrations.js";
 import { loginAs, ROLES, seedCompany, seedUser } from "./test/helpers.js";
 
+async function truncateAll(): Promise<void> {
+  await exec(
+    `TRUNCATE audit_events, sessions, invitations, user_roles, users, companies CASCADE`,
+  );
+}
+
 describe("RBAC, invites, MFA gating", () => {
-  let app: Awaited<ReturnType<typeof buildApp>>;
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+  let dbReady = false;
+
+  beforeAll(async () => {
+    resetConfigCache();
+    process.env.DATABASE_URL =
+      process.env.TEST_DATABASE_URL ??
+      process.env.DATABASE_URL ??
+      "postgresql://root@127.0.0.1:26257/defaultdb?sslmode=disable";
+    process.env.NODE_ENV = "test";
+    process.env.SESSION_SECRET = "test-session-secret-32chars-min!!";
+    process.env.CORS_ORIGIN = "http://localhost:5173";
+    try {
+      await resetPoolSingleton();
+      await runMigrations();
+      await truncateAll();
+      dbReady = true;
+    } catch (e) {
+      const err = e as { code?: string };
+      if (err.code === "ECONNREFUSED") {
+        console.warn(
+          "[tests] CockroachDB not reachable; skipping integration tests. Start with: docker compose up -d cockroach",
+        );
+        dbReady = false;
+        return;
+      }
+      throw e;
+    }
+  });
+
+  afterAll(async () => {
+    await resetPoolSingleton();
+    resetConfigCache();
+  });
 
   beforeEach(async () => {
+    if (!dbReady) return;
+    await truncateAll();
     app = await buildApp({ logger: false });
   });
 
   afterEach(async () => {
-    await app.close();
+    if (app) {
+      await app.close();
+      app = undefined;
+    }
   });
 
-  it("denies customer user from listing members (403)", async () => {
-    const companyId = seedCompany();
-    const { id: uid } = seedUser(companyId, [ROLES.CUSTOMER_USER]);
-    const { cookie } = await loginAs(app, uid);
-    const res = await app.inject({
+  it.skipIf(!dbReady)("denies customer user from listing members (403)", async () => {
+    const companyId = await seedCompany();
+    const { id: uid } = await seedUser(companyId, [ROLES.CUSTOMER_USER]);
+    const { cookie } = await loginAs(app!, uid);
+    const res = await app!.inject({
       method: "GET",
       url: `/api/v1/companies/${companyId}/users`,
       headers: { cookie },
@@ -25,11 +81,11 @@ describe("RBAC, invites, MFA gating", () => {
     expect(res.statusCode).toBe(403);
   });
 
-  it("allows customer admin to list members", async () => {
-    const companyId = seedCompany();
-    const { id: adminId } = seedUser(companyId, [ROLES.CUSTOMER_ADMIN]);
-    const { cookie } = await loginAs(app, adminId);
-    const res = await app.inject({
+  it.skipIf(!dbReady)("allows customer admin to list members", async () => {
+    const companyId = await seedCompany();
+    const { id: adminId } = await seedUser(companyId, [ROLES.CUSTOMER_ADMIN]);
+    const { cookie } = await loginAs(app!, adminId);
+    const res = await app!.inject({
       method: "GET",
       url: `/api/v1/companies/${companyId}/users`,
       headers: { cookie },
@@ -39,12 +95,12 @@ describe("RBAC, invites, MFA gating", () => {
     expect(body.members.length).toBe(1);
   });
 
-  it("invite lifecycle: create and list pending", async () => {
-    const companyId = seedCompany();
-    const { id: adminId } = seedUser(companyId, [ROLES.CUSTOMER_ADMIN]);
-    const { cookie } = await loginAs(app, adminId);
+  it.skipIf(!dbReady)("invite lifecycle: create and list pending", async () => {
+    const companyId = await seedCompany();
+    const { id: adminId } = await seedUser(companyId, [ROLES.CUSTOMER_ADMIN]);
+    const { cookie } = await loginAs(app!, adminId);
 
-    const create = await app.inject({
+    const create = await app!.inject({
       method: "POST",
       url: `/api/v1/companies/${companyId}/invitations`,
       headers: { cookie },
@@ -52,7 +108,7 @@ describe("RBAC, invites, MFA gating", () => {
     });
     expect(create.statusCode).toBe(201);
 
-    const list = await app.inject({
+    const list = await app!.inject({
       method: "GET",
       url: `/api/v1/companies/${companyId}/invitations`,
       headers: { cookie },
@@ -66,10 +122,10 @@ describe("RBAC, invites, MFA gating", () => {
     );
   });
 
-  it("blocks internal ping without MFA on session", async () => {
-    const { id } = seedUser(null, [ROLES.INTERNAL_STAFF]);
-    const { cookie } = await loginAs(app, id);
-    const res = await app.inject({
+  it.skipIf(!dbReady)("blocks internal ping without MFA on session", async () => {
+    const { id } = await seedUser(null, [ROLES.INTERNAL_STAFF]);
+    const { cookie } = await loginAs(app!, id);
+    const res = await app!.inject({
       method: "GET",
       url: "/api/v1/internal/ping",
       headers: { cookie },
@@ -79,13 +135,13 @@ describe("RBAC, invites, MFA gating", () => {
     expect(body.error.code).toBe("MFA_REQUIRED");
   });
 
-  it("rate limits invite creation after threshold", async () => {
-    const companyId = seedCompany();
-    const { id: adminId } = seedUser(companyId, [ROLES.CUSTOMER_ADMIN]);
-    const { cookie } = await loginAs(app, adminId);
+  it.skipIf(!dbReady)("rate limits invite creation after threshold", async () => {
+    const companyId = await seedCompany();
+    const { id: adminId } = await seedUser(companyId, [ROLES.CUSTOMER_ADMIN]);
+    const { cookie } = await loginAs(app!, adminId);
     let lastStatus = 201;
     for (let i = 0; i < 35; i++) {
-      const res = await app.inject({
+      const res = await app!.inject({
         method: "POST",
         url: `/api/v1/companies/${companyId}/invitations`,
         headers: { cookie },

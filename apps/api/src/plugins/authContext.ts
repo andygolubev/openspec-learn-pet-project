@@ -29,11 +29,11 @@ export function getSessionCookieName(): string {
 
 export async function attachAuthFromCookie(req: FastifyRequest): Promise<void> {
   const sid = req.cookies[COOKIE];
-  const sess = getSession(sid);
+  const sess = await getSession(sid);
   if (!sess) return;
-  const user = getUserById(sess.userId);
+  const user = await getUserById(sess.userId);
   if (!user) return;
-  const roles = listRolesForUser(user.id);
+  const roles = await listRolesForUser(user.id);
   req.auth = {
     user,
     roles,

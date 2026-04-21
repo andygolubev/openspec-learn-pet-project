@@ -66,7 +66,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
           "Not a member of this company",
         );
       }
-      const c = getCompany(companyId);
+      const c = await getCompany(companyId);
       if (!c) {
         return sendError(reply, 404, ErrorCodes.NOT_FOUND, "Company not found");
       }
@@ -104,7 +104,9 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
           "Customer admin required",
         );
       }
-      return reply.send({ invitations: listPendingInvitations(companyId) });
+      return reply.send({
+        invitations: await listPendingInvitations(companyId),
+      });
     },
   );
 
@@ -133,7 +135,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
           "Customer admin required",
         );
       }
-      return reply.send({ members: listMembership(companyId) });
+      return reply.send({ members: await listMembership(companyId) });
     },
   );
 
@@ -162,7 +164,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
       const a = req.auth!;
       try {
         assertCustomerAdmin(a.user, a.roles, p.data.companyId);
-        setUserRoles(
+        await setUserRoles(
           req.log,
           p.data.companyId,
           p.data.userId,
@@ -199,7 +201,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
       const a = req.auth!;
       try {
         assertCustomerAdmin(a.user, a.roles, p.data.companyId);
-        removeUserFromCompany(
+        await removeUserFromCompany(
           req.log,
           p.data.companyId,
           p.data.userId,
@@ -262,7 +264,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
       }
       const config = loadConfig();
       try {
-        const { id, token } = createInvitation(req.log, {
+        const { id, token } = await createInvitation(req.log, {
           companyId: p.data.companyId,
           email: b.data.email,
           createdByUserId: a.user.id,
@@ -280,7 +282,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
         if (
           err.message === "CONFLICT" ||
           err.statusCode === 409 ||
-          err.code === "SQLITE_CONSTRAINT_UNIQUE"
+          err.code === "23505"
         ) {
           return sendError(
             reply,
@@ -318,7 +320,7 @@ export async function registerCompanyRoutes(app: FastifyInstance) {
           "Customer admin required",
         );
       }
-      const ok = revokeInvitation(
+      const ok = await revokeInvitation(
         req.log,
         p.data.companyId,
         p.data.inviteId,

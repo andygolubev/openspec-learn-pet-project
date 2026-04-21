@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyBaseLogger } from "fastify";
-import { getDb } from "../db/index.js";
+import { exec, q, qOne } from "../db/index.js";
 import { ROLES, hasCustomerAdmin, isInternalRole } from "../roles.js";
 import { logAudit } from "./audit.js";
 
@@ -14,102 +14,123 @@ export type UserRow = {
   created_at: number;
 };
 
+function num(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return Number(v);
+  return 0;
+}
+
+function mapUser(row: Record<string, unknown>): UserRow {
+  return {
+    id: String(row.id),
+    oidc_sub: String(row.oidc_sub),
+    email: String(row.email),
+    company_id: row.company_id ? String(row.company_id) : null,
+    created_at: num(row.created_at),
+  };
+}
+
 function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-export function listRolesForUser(userId: string): string[] {
-  const rows = getDb()
-    .prepare(`SELECT role FROM user_roles WHERE user_id = ?`)
-    .all(userId) as { role: string }[];
+export async function listRolesForUser(userId: string): Promise<string[]> {
+  const rows = await q<{ role: string }>(
+    `SELECT role FROM user_roles WHERE user_id = $1`,
+    [userId],
+  );
   return rows.map((r) => r.role);
 }
 
-export function getUserById(userId: string): UserRow | null {
-  const row = getDb()
-    .prepare(`SELECT id, oidc_sub, email, company_id, created_at FROM users WHERE id = ?`)
-    .get(userId) as UserRow | undefined;
-  return row ?? null;
+export async function getUserById(userId: string): Promise<UserRow | null> {
+  const row = await qOne<Record<string, unknown>>(
+    `SELECT id, oidc_sub, email, company_id, created_at FROM users WHERE id = $1`,
+    [userId],
+  );
+  return row ? mapUser(row) : null;
 }
 
-export function getUserBySub(oidcSub: string): UserRow | null {
-  const row = getDb()
-    .prepare(
-      `SELECT id, oidc_sub, email, company_id, created_at FROM users WHERE oidc_sub = ?`,
-    )
-    .get(oidcSub) as UserRow | undefined;
-  return row ?? null;
+export async function getUserBySub(oidcSub: string): Promise<UserRow | null> {
+  const row = await qOne<Record<string, unknown>>(
+    `SELECT id, oidc_sub, email, company_id, created_at FROM users WHERE oidc_sub = $1`,
+    [oidcSub],
+  );
+  return row ? mapUser(row) : null;
 }
 
-/**
- * Upsert user by OIDC subject; optionally attach company from pending invite matching email.
- */
-export function ensureUserFromOidc(
+export async function ensureUserFromOidc(
   log: FastifyBaseLogger,
   input: {
     oidcSub: string;
     email: string;
     inviteToken?: string | null;
   },
-): { user: UserRow; roles: string[] } {
-  const db = getDb();
-  const existing = getUserBySub(input.oidcSub);
+): Promise<{ user: UserRow; roles: string[] }> {
+  const existing = await getUserBySub(input.oidcSub);
   if (existing) {
-    const roles = listRolesForUser(existing.id);
     if (input.inviteToken && !existing.company_id) {
-      tryAcceptInvite(log, existing.id, existing.email, input.inviteToken);
+      await tryAcceptInvite(log, existing.id, existing.email, input.inviteToken);
     }
-    const after = getUserById(existing.id)!;
-    return { user: after, roles: listRolesForUser(after.id) };
+    const after = await getUserById(existing.id);
+    if (!after) throw new Error("user missing after invite");
+    return { user: after, roles: await listRolesForUser(after.id) };
   }
 
   const id = randomUUID();
   const now = Date.now();
-  db.prepare(
-    `INSERT INTO users (id, oidc_sub, email, company_id, created_at) VALUES (?, ?, ?, ?, ?)`,
-  ).run(id, input.oidcSub, input.email, null, now);
+  await exec(
+    `INSERT INTO users (id, oidc_sub, email, company_id, created_at) VALUES ($1, $2, $3, $4, $5)`,
+    [id, input.oidcSub, input.email, null, now],
+  );
 
   let companyId: string | null = null;
   if (input.inviteToken) {
-    companyId = tryAcceptInvite(log, id, input.email, input.inviteToken);
+    companyId = await tryAcceptInvite(log, id, input.email, input.inviteToken);
   } else {
-    companyId = tryAutoJoinPendingInviteByEmail(log, id, input.email);
+    companyId = await tryAutoJoinPendingInviteByEmail(log, id, input.email);
   }
 
   if (companyId) {
-    db.prepare(`UPDATE users SET company_id = ? WHERE id = ?`).run(companyId, id);
-    db.prepare(
-      `INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, ?)`,
-    ).run(id, ROLES.CUSTOMER_USER);
+    await exec(`UPDATE users SET company_id = $1 WHERE id = $2`, [
+      companyId,
+      id,
+    ]);
+    await exec(
+      `INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [id, ROLES.CUSTOMER_USER],
+    );
   }
 
-  const user = getUserById(id)!;
-  return { user, roles: listRolesForUser(user.id) };
+  const user = await getUserById(id);
+  if (!user) throw new Error("user missing after create");
+  return { user, roles: await listRolesForUser(user.id) };
 }
 
-function tryAutoJoinPendingInviteByEmail(
+async function tryAutoJoinPendingInviteByEmail(
   log: FastifyBaseLogger,
   userId: string,
   email: string,
-): string | null {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT id, company_id FROM invitations WHERE email = ? AND status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
-    )
-    .get(email.toLowerCase(), Date.now()) as
-    | { id: string; company_id: string }
-    | undefined;
+): Promise<string | null> {
+  const em = email.toLowerCase();
+  const row = await qOne<{ id: string; company_id: string }>(
+    `SELECT id, company_id FROM invitations
+     WHERE lower(email) = lower($1) AND status = 'pending' AND expires_at > $2
+     ORDER BY created_at DESC LIMIT 1`,
+    [em, Date.now()],
+  );
   if (!row) return null;
-  db.prepare(`UPDATE users SET company_id = ? WHERE id = ?`).run(
+  await exec(`UPDATE users SET company_id = $1 WHERE id = $2`, [
     row.company_id,
     userId,
+  ]);
+  await exec(`UPDATE invitations SET status = 'accepted' WHERE id = $1`, [
+    row.id,
+  ]);
+  await exec(
+    `INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [userId, ROLES.CUSTOMER_USER],
   );
-  db.prepare(`UPDATE invitations SET status = 'accepted' WHERE id = ?`).run(row.id);
-  db.prepare(
-    `INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, ?)`,
-  ).run(userId, ROLES.CUSTOMER_USER);
-  logAudit(log, {
+  await logAudit(log, {
     action: "invite_accepted",
     actorUserId: userId,
     targetType: "invitation",
@@ -120,44 +141,43 @@ function tryAutoJoinPendingInviteByEmail(
   return row.company_id;
 }
 
-function tryAcceptInvite(
+async function tryAcceptInvite(
   log: FastifyBaseLogger,
   userId: string,
   email: string,
   rawToken: string,
-): string | null {
-  const db = getDb();
+): Promise<string | null> {
   const th = hashToken(rawToken);
-  const inv = db
-    .prepare(
-      `SELECT id, company_id, email, status, expires_at FROM invitations WHERE token_hash = ?`,
-    )
-    .get(th) as
-    | {
-        id: string;
-        company_id: string;
-        email: string;
-        status: string;
-        expires_at: number;
-      }
-    | undefined;
-  if (!inv || inv.status !== "pending" || inv.expires_at < Date.now()) {
+  const inv = await qOne<{
+    id: string;
+    company_id: string;
+    email: string;
+    status: string;
+    expires_at: unknown;
+  }>(
+    `SELECT id, company_id, email, status, expires_at FROM invitations WHERE token_hash = $1`,
+    [th],
+  );
+  if (!inv || inv.status !== "pending" || num(inv.expires_at) < Date.now()) {
     return null;
   }
   if (inv.email.toLowerCase() !== email.toLowerCase()) {
     log.warn({ inviteId: inv.id }, "invite email mismatch");
     return null;
   }
-  db.prepare(`UPDATE users SET company_id = ? WHERE id = ?`).run(
+  await exec(`UPDATE users SET company_id = $1 WHERE id = $2`, [
     inv.company_id,
     userId,
+  ]);
+  await exec(`UPDATE invitations SET status = 'accepted' WHERE id = $1`, [
+    inv.id,
+  ]);
+  await exec(`DELETE FROM user_roles WHERE user_id = $1`, [userId]);
+  await exec(
+    `INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [userId, ROLES.CUSTOMER_USER],
   );
-  db.prepare(`UPDATE invitations SET status = 'accepted' WHERE id = ?`).run(inv.id);
-  db.prepare(`DELETE FROM user_roles WHERE user_id = ?`).run(userId);
-  db.prepare(
-    `INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, ?)`,
-  ).run(userId, ROLES.CUSTOMER_USER);
-  logAudit(log, {
+  await logAudit(log, {
     action: "invite_accepted",
     actorUserId: userId,
     targetType: "invitation",
@@ -168,52 +188,60 @@ function tryAcceptInvite(
   return inv.company_id;
 }
 
-export function createSession(
+export async function createSession(
   userId: string,
   mfaSatisfied: boolean,
   ttlMs: number,
-): string {
+): Promise<string> {
   const id = randomUUID();
   const now = Date.now();
-  getDb()
-    .prepare(
-      `INSERT INTO sessions (id, user_id, expires_at, mfa_satisfied, created_at) VALUES (?, ?, ?, ?, ?)`,
-    )
-    .run(id, userId, now + ttlMs, mfaSatisfied ? 1 : 0, now);
+  await exec(
+    `INSERT INTO sessions (id, user_id, expires_at, mfa_satisfied, created_at) VALUES ($1, $2, $3, $4, $5)`,
+    [id, userId, now + ttlMs, mfaSatisfied, now],
+  );
   return id;
 }
 
-export function getSession(sessionId: string | undefined): {
-  userId: string;
-  mfaSatisfied: boolean;
-} | null {
+export async function getSession(
+  sessionId: string | undefined,
+): Promise<{ userId: string; mfaSatisfied: boolean } | null> {
   if (!sessionId) return null;
-  const row = getDb()
-    .prepare(
-      `SELECT user_id, mfa_satisfied, expires_at FROM sessions WHERE id = ?`,
-    )
-    .get(sessionId) as
-    | { user_id: string; mfa_satisfied: number; expires_at: number }
-    | undefined;
-  if (!row || row.expires_at < Date.now()) return null;
+  const row = await qOne<{
+    user_id: string;
+    mfa_satisfied: boolean;
+    expires_at: unknown;
+  }>(
+    `SELECT user_id, mfa_satisfied, expires_at FROM sessions WHERE id = $1`,
+    [sessionId],
+  );
+  if (!row || num(row.expires_at) < Date.now()) return null;
   return {
-    userId: row.user_id,
-    mfaSatisfied: row.mfa_satisfied === 1,
+    userId: String(row.user_id),
+    mfaSatisfied: !!row.mfa_satisfied,
   };
 }
 
-export function deleteSession(sessionId: string): void {
-  getDb().prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);
+export async function deleteSession(sessionId: string): Promise<void> {
+  await exec(`DELETE FROM sessions WHERE id = $1`, [sessionId]);
 }
 
-export function getCompany(companyId: string) {
-  return getDb()
-    .prepare(
-      `SELECT id, name, erp_customer_id, created_at FROM companies WHERE id = ?`,
-    )
-    .get(companyId) as
-    | { id: string; name: string; erp_customer_id: string | null; created_at: number }
-    | undefined;
+export async function getCompany(companyId: string) {
+  const row = await qOne<{
+    id: string;
+    name: string;
+    erp_customer_id: string | null;
+    created_at: unknown;
+  }>(
+    `SELECT id, name, erp_customer_id, created_at FROM companies WHERE id = $1`,
+    [companyId],
+  );
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    erp_customer_id: row.erp_customer_id,
+    created_at: num(row.created_at),
+  };
 }
 
 export function assertCompanyMember(
@@ -233,7 +261,11 @@ export function assertCompanyMember(
   }
 }
 
-export function assertCustomerAdmin(user: UserRow, roles: string[], companyId: string) {
+export function assertCustomerAdmin(
+  user: UserRow,
+  roles: string[],
+  companyId: string,
+) {
   assertCompanyMember(user, roles, companyId);
   if (!hasCustomerAdmin(roles)) {
     const err = new Error("FORBIDDEN");
@@ -242,20 +274,18 @@ export function assertCustomerAdmin(user: UserRow, roles: string[], companyId: s
   }
 }
 
-export function createInvitation(
+export async function createInvitation(
   log: FastifyBaseLogger,
   input: {
     companyId: string;
     email: string;
     createdByUserId: string;
   },
-): { id: string; token: string } {
-  const db = getDb();
-  const dup = db
-    .prepare(
-      `SELECT id FROM invitations WHERE company_id = ? AND lower(email) = lower(?) AND status = 'pending'`,
-    )
-    .get(input.companyId, input.email) as { id: string } | undefined;
+): Promise<{ id: string; token: string }> {
+  const dup = await qOne<{ id: string }>(
+    `SELECT id FROM invitations WHERE company_id = $1 AND lower(email) = lower($2) AND status = 'pending'`,
+    [input.companyId, input.email],
+  );
   if (dup) {
     const err = new Error("CONFLICT");
     (err as Error & { statusCode: number }).statusCode = 409;
@@ -265,19 +295,20 @@ export function createInvitation(
   const token = randomUUID() + randomUUID();
   const th = hashToken(token);
   const now = Date.now();
-  db.prepare(
+  await exec(
     `INSERT INTO invitations (id, company_id, email, token_hash, status, expires_at, created_by_user_id, created_at)
-     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
-  ).run(
-    id,
-    input.companyId,
-    input.email.toLowerCase(),
-    th,
-    now + INVITE_TTL_MS,
-    input.createdByUserId,
-    now,
+     VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)`,
+    [
+      id,
+      input.companyId,
+      input.email.toLowerCase(),
+      th,
+      now + INVITE_TTL_MS,
+      input.createdByUserId,
+      now,
+    ],
   );
-  logAudit(log, {
+  await logAudit(log, {
     action: "invite_created",
     actorUserId: input.createdByUserId,
     targetType: "invitation",
@@ -288,42 +319,41 @@ export function createInvitation(
   return { id, token };
 }
 
-export function listPendingInvitations(companyId: string) {
-  const rows = getDb()
-    .prepare(
-      `SELECT id, email, status, expires_at, created_at FROM invitations WHERE company_id = ? AND status = 'pending' ORDER BY created_at DESC`,
-    )
-    .all(companyId) as {
+export async function listPendingInvitations(companyId: string) {
+  const rows = await q<{
     id: string;
     email: string;
     status: string;
-    expires_at: number;
-    created_at: number;
-  }[];
+    expires_at: unknown;
+    created_at: unknown;
+  }>(
+    `SELECT id, email, status, expires_at, created_at FROM invitations WHERE company_id = $1 AND status = 'pending' ORDER BY created_at DESC`,
+    [companyId],
+  );
   return rows.map((r) => ({
     id: r.id,
     email: r.email,
     status: r.status,
-    expiresAt: r.expires_at,
-    createdAt: r.created_at,
+    expiresAt: num(r.expires_at),
+    createdAt: num(r.created_at),
   }));
 }
 
-export function revokeInvitation(
+export async function revokeInvitation(
   log: FastifyBaseLogger,
   companyId: string,
   inviteId: string,
   actorUserId: string,
-): boolean {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT id FROM invitations WHERE id = ? AND company_id = ? AND status = 'pending'`,
-    )
-    .get(inviteId, companyId) as { id: string } | undefined;
+): Promise<boolean> {
+  const row = await qOne<{ id: string }>(
+    `SELECT id FROM invitations WHERE id = $1 AND company_id = $2 AND status = 'pending'`,
+    [inviteId, companyId],
+  );
   if (!row) return false;
-  db.prepare(`UPDATE invitations SET status = 'revoked' WHERE id = ?`).run(inviteId);
-  logAudit(log, {
+  await exec(`UPDATE invitations SET status = 'revoked' WHERE id = $1`, [
+    inviteId,
+  ]);
+  await logAudit(log, {
     action: "invite_revoked",
     actorUserId,
     targetType: "invitation",
@@ -333,48 +363,50 @@ export function revokeInvitation(
   return true;
 }
 
-export function listMembership(companyId: string) {
-  const users = getDb()
-    .prepare(
-      `SELECT id, email, created_at FROM users WHERE company_id = ? ORDER BY email`,
-    )
-    .all(companyId) as { id: string; email: string; created_at: number }[];
-  return users.map((u) => ({
-    userId: u.id,
-    email: u.email,
-    createdAt: u.created_at,
-    roles: listRolesForUser(u.id),
-  }));
+export async function listMembership(companyId: string) {
+  const users = await q<{ id: string; email: string; created_at: unknown }>(
+    `SELECT id, email, created_at FROM users WHERE company_id = $1 ORDER BY email`,
+    [companyId],
+  );
+  const out = [];
+  for (const u of users) {
+    out.push({
+      userId: u.id,
+      email: u.email,
+      createdAt: num(u.created_at),
+      roles: await listRolesForUser(u.id),
+    });
+  }
+  return out;
 }
 
-export function setUserRoles(
+export async function setUserRoles(
   log: FastifyBaseLogger,
   companyId: string,
   targetUserId: string,
   newRoles: string[],
   actorUserId: string,
-): void {
-  const db = getDb();
-  const target = getUserById(targetUserId);
+): Promise<void> {
+  const target = await getUserById(targetUserId);
   if (!target || target.company_id !== companyId) {
     const err = new Error("NOT_FOUND");
     (err as Error & { statusCode: number }).statusCode = 404;
     throw err;
   }
-  const actor = getUserById(actorUserId);
+  const actor = await getUserById(actorUserId);
   if (target.id === actor?.id) {
     const err = new Error("FORBIDDEN");
     (err as Error & { statusCode: number }).statusCode = 403;
     throw err;
   }
-  db.prepare(`DELETE FROM user_roles WHERE user_id = ?`).run(targetUserId);
+  await exec(`DELETE FROM user_roles WHERE user_id = $1`, [targetUserId]);
   for (const r of newRoles) {
-    db.prepare(`INSERT INTO user_roles (user_id, role) VALUES (?, ?)`).run(
+    await exec(`INSERT INTO user_roles (user_id, role) VALUES ($1, $2)`, [
       targetUserId,
       r,
-    );
+    ]);
   }
-  logAudit(log, {
+  await logAudit(log, {
     action: "role_changed",
     actorUserId,
     targetType: "user",
@@ -384,14 +416,13 @@ export function setUserRoles(
   });
 }
 
-export function removeUserFromCompany(
+export async function removeUserFromCompany(
   log: FastifyBaseLogger,
   companyId: string,
   targetUserId: string,
   actorUserId: string,
-): void {
-  const db = getDb();
-  const target = getUserById(targetUserId);
+): Promise<void> {
+  const target = await getUserById(targetUserId);
   if (!target || target.company_id !== companyId) {
     const err = new Error("NOT_FOUND");
     (err as Error & { statusCode: number }).statusCode = 404;
@@ -402,9 +433,11 @@ export function removeUserFromCompany(
     (err as Error & { statusCode: number }).statusCode = 403;
     throw err;
   }
-  db.prepare(`UPDATE users SET company_id = NULL WHERE id = ?`).run(targetUserId);
-  db.prepare(`DELETE FROM user_roles WHERE user_id = ?`).run(targetUserId);
-  logAudit(log, {
+  await exec(`UPDATE users SET company_id = NULL WHERE id = $1`, [
+    targetUserId,
+  ]);
+  await exec(`DELETE FROM user_roles WHERE user_id = $1`, [targetUserId]);
+  await logAudit(log, {
     action: "user_removed",
     actorUserId,
     targetType: "user",

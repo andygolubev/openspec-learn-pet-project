@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyBaseLogger } from "fastify";
-import { getDb } from "../db/index.js";
+import { exec } from "../db/index.js";
 
 export type AuditAction =
   | "invite_created"
@@ -9,7 +9,7 @@ export type AuditAction =
   | "role_changed"
   | "user_removed";
 
-export function logAudit(
+export async function logAudit(
   log: FastifyBaseLogger,
   input: {
     action: AuditAction;
@@ -19,16 +19,14 @@ export function logAudit(
     companyId: string | null;
     meta?: Record<string, unknown>;
   },
-): void {
+): Promise<void> {
   const id = randomUUID();
   const ts = Date.now();
   const meta_json = input.meta ? JSON.stringify(input.meta) : null;
-  getDb()
-    .prepare(
-      `INSERT INTO audit_events (id, ts, action, actor_user_id, target_type, target_id, company_id, meta_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+  await exec(
+    `INSERT INTO audit_events (id, ts, action, actor_user_id, target_type, target_id, company_id, meta_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
       id,
       ts,
       input.action,
@@ -37,7 +35,8 @@ export function logAudit(
       input.targetId,
       input.companyId,
       meta_json,
-    );
+    ],
+  );
   log.info(
     {
       audit: true,

@@ -115,12 +115,12 @@ export async function registerAuthRoutes(app: FastifyInstance) {
         );
       }
       const mfaOk = isMfaSatisfiedFromClaims(config, claims);
-      const { user, roles } = ensureUserFromOidc(req.log, {
+      const { user, roles } = await ensureUserFromOidc(req.log, {
         oidcSub: sub,
         email,
         inviteToken: invite_token ?? null,
       });
-      const sid = createSession(user.id, mfaOk, SESSION_TTL_MS);
+      const sid = await createSession(user.id, mfaOk, SESSION_TTL_MS);
       reply.setCookie(cookieName, sid, {
         httpOnly: true,
         secure: config.NODE_ENV === "production",
@@ -149,7 +149,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
   app.post("/api/v1/auth/logout", async (req, reply) => {
     const sid = req.cookies[cookieName];
-    if (sid) deleteSession(sid);
+    if (sid) await deleteSession(sid);
     reply.clearCookie(cookieName, { path: "/" });
     return reply.status(204).send();
   });
@@ -208,13 +208,13 @@ export async function registerAuthRoutes(app: FastifyInstance) {
         body.error.message,
       );
     }
-    const user = getUserById(body.data.userId);
+    const user = await getUserById(body.data.userId);
     if (!user) {
       return sendError(reply, 404, ErrorCodes.NOT_FOUND, "User not found");
     }
-    const roles = listRolesForUser(user.id);
+    const roles = await listRolesForUser(user.id);
     const mfaOk = !roles.some((r) => r.startsWith("internal_"));
-    const sid = createSession(user.id, mfaOk, SESSION_TTL_MS);
+    const sid = await createSession(user.id, mfaOk, SESSION_TTL_MS);
     reply.setCookie(cookieName, sid, {
       httpOnly: true,
       secure: false,

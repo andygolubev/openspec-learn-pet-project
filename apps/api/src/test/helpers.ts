@@ -1,20 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { getDb } from "../db/index.js";
+import { exec } from "../db/query.js";
 import { ROLES } from "../roles.js";
 
-export function seedCompany(name = "Test Co") {
+export async function seedCompany(name = "Test Co") {
   const id = randomUUID();
   const now = Date.now();
-  getDb()
-    .prepare(
-      `INSERT INTO companies (id, name, erp_customer_id, created_at) VALUES (?, ?, ?, ?)`,
-    )
-    .run(id, name, "ERP-T-1", now);
+  await exec(
+    `INSERT INTO companies (id, name, erp_customer_id, created_at) VALUES ($1, $2, $3, $4)`,
+    [id, name, "ERP-T-1", now],
+  );
   return id;
 }
 
-export function seedUser(
+export async function seedUser(
   companyId: string | null,
   roles: string[],
   email?: string,
@@ -23,15 +22,12 @@ export function seedUser(
   const em = email ?? `u-${id.slice(0, 8)}@test.local`;
   const sub = `oidc-${id}`;
   const now = Date.now();
-  getDb()
-    .prepare(
-      `INSERT INTO users (id, oidc_sub, email, company_id, created_at) VALUES (?, ?, ?, ?, ?)`,
-    )
-    .run(id, sub, em, companyId, now);
+  await exec(
+    `INSERT INTO users (id, oidc_sub, email, company_id, created_at) VALUES ($1, $2, $3, $4, $5)`,
+    [id, sub, em, companyId, now],
+  );
   for (const r of roles) {
-    getDb()
-      .prepare(`INSERT INTO user_roles (user_id, role) VALUES (?, ?)`)
-      .run(id, r);
+    await exec(`INSERT INTO user_roles (user_id, role) VALUES ($1, $2)`, [id, r]);
   }
   return { id, email: em, sub };
 }
